@@ -1,0 +1,112 @@
+import shap
+import matplotlib.pyplot as plt
+
+# Transform test set
+X_test_enc = preprocessor.transform(X_test)
+
+feat_names = (
+    numeric_features +
+    list(preprocessor.named_transformers_["cat"].get_feature_names_out(category_features))
+)
+
+explainer_shap = shap.Explainer(
+    gbt_pipeline["classifier"],
+    shap.maskers.Independent(X_test_enc, max_samples=100)
+)
+
+shap_values = explainer_shap(X_test_enc)
+
+# Beeswarm plot
+shap.summary_plot(shap_values, X_test_enc, feature_names=feat_names)
+
+X_test_copy = X_test.copy()
+X_test_copy["pred_prob"] = gbt_pipeline.predict_proba(X_test)[:, 1]
+
+# Highest + lowest risk per group
+black_high = X_test_copy[X_test_copy["race"] == "African-American"].sort_values("pred_prob", ascending=False).index[0]
+black_low  = X_test_copy[X_test_copy["race"] == "African-American"].sort_values("pred_prob").index[0]
+
+white_high = X_test_copy[X_test_copy["race"] == "Caucasian"].sort_values("pred_prob", ascending=False).index[0]
+white_low  = X_test_copy[X_test_copy["race"] == "Caucasian"].sort_values("pred_prob").index[0]
+
+indices = [
+    ("Black High Risk", black_high),
+    ("Black Low Risk", black_low),
+    ("White High Risk", white_high),
+    ("White Low Risk", white_low),
+]
+
+#waterfall
+
+plt.figure(figsize=(12, 10))
+
+for i, (label, idx) in enumerate(indices):
+    plt.subplot(2, 2, i+1)
+    loc = X_test.index.get_loc(idx)
+    shap.waterfall_plot(shap_values[loc], max_display=8, show=False)
+    plt.title(label)
+
+plt.tight_layout()
+plt.show()
+
+#LIME
+from lime.lime_tabular import LimeTabularExplainer
+import numpy as np
+
+X_train_enc = preprocessor.fit_transform(X_train)
+
+explainer = LimeTabularExplainer(
+    training_data=X_train_enc,
+    feature_names=feat_names,
+    class_names=["No Recid", "Recid"],
+    mode="classification",
+    discretize_continuous=True,
+    random_state=42
+)
+
+for label, idx in indices:
+    row_enc = preprocessor.transform(X_test.loc[[idx]])
+
+    exp = explainer.explain_instance(
+        data_row=row_enc.toarray()[0],
+        predict_fn=gbt_pipeline["classifier"].predict_proba,
+        num_features=6
+    )
+
+    print(f"\nLIME: {label}")
+    for feat, weight in exp.as_list():
+        print(f"{feat:<40} {weight:+.4f}")
+
+
+#DiCE counterfactual
+
+import dice_ml
+from dice_ml import Dice
+import pandas as pd
+
+dice_data = dice_ml.Data(
+    dataframe=pd.concat([X_train, y_train], axis=1),
+    continuous_features=numeric_features,
+    outcome_name=target
+)
+
+dice_model = dice_ml.Model(
+    model=gbt_pipeline,
+    backend="sklearn",
+    model_type="classifier"
+)
+
+exp_dice = Dice(dice_data, dice_model, method="random")
+
+for label, idx in indices:
+    query = X_test.loc[[idx]]
+
+    cf = exp_dice.generate_counterfactuals(
+        query,
+        total_CFs=2,
+        desired_class="opposite",
+        features_to_vary=["age", "priors_count", "c_charge_degree"]
+    )
+
+    print(f"\nCounterfactuals: {label}")
+    cf.visualize_as_dataframe(show_only_changes=True)
